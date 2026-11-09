@@ -8,6 +8,7 @@ results is due to the scorer alone.
 
 import argparse
 import json
+from dataclasses import asdict
 
 from app.agent.schemas import AgentResult, FinalReport, Step
 from demo_app.faults import SCENARIOS
@@ -33,6 +34,9 @@ def main() -> None:
     label = parser.parse_args().label
     data = json.loads((RESULTS_DIR / f"{label}.json").read_text())
     records = [rescore(r) for r in data["records"]]
+    # keep the stored JSON consistent with the summary: write the fresh scores back
+    data["records"] = [asdict(r) for r in records]
+    (RESULTS_DIR / f"{label}.json").write_text(json.dumps(data, indent=2, default=str))
     summary = summarize(data["model"], data["runs_per_scenario"], records)
     (RESULTS_DIR / f"{label}.md").write_text(summary)
     print(summary)

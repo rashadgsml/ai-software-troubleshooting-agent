@@ -151,3 +151,47 @@ def test_date_in_finding_matches_full_iso_timestamp_in_output():
     assert score_run(DISK, make_result(report, calls=[("get_recent_deployments", {}, out)])).grounding == 1.0
     wrong_day = make_report(evidence=[Evidence(tool="get_recent_deployments", finding="deployed 2026-11-09")])
     assert score_run(DISK, make_result(wrong_day, calls=[("get_recent_deployments", {}, out)])).grounding == 0.0
+
+
+def test_tool_errors_are_counted():
+    result = make_result(make_report())
+    result.steps.append(Step(99, "tool_result", "submit_report", "Invalid report", is_error=True))
+    assert score_run(DISK, result).tool_errors == 1
+    assert score_run(DISK, make_result(make_report())).tool_errors == 0
+
+
+def _grounding(finding, output, tool="search_logs"):
+    report = make_report(evidence=[Evidence(tool=tool, finding=finding)])
+    return score_run(DISK, make_result(report, calls=[(tool, {}, output)])).grounding
+
+
+def test_units_glued_in_the_tool_output_still_match():
+    # real regressions: output "took 5100ms" / "timeout=5s" / "200 40ms", model wrote them with or without units
+    assert _grounding("call took 5100 ms and 9100ms", "inventory call took 5100ms ... took 9100ms") == 1.0
+    assert _grounding("ReadTimeout (timeout=5s)", "ReadTimeout: inventory-service (timeout=5s)") == 1.0
+    assert _grounding("latencies went 40ms, 41, 42", "GET /products 200 40ms\nGET /products 200 41ms\nGET /products 200 42ms") == 1.0
+
+
+def test_number_boundaries_still_reject_longer_numbers():
+    assert _grounding("took 55 ms", "took 5ms") == 0.0       # 55 is not 5
+    assert _grounding("disk 99.9 percent", "disk 99.95") == 0.0
+    assert _grounding("took 5 ms", "took 55ms") == 0.0       # 5 is not 55
+
+
+def test_slash_separated_prose_is_not_treated_as_an_identifier():
+    # real regression: "caching/circuit breaker/fallback" was parsed as slash-joined identifiers
+    report = make_report(evidence=[Evidence(tool="lookup_runbook", finding="add caching/circuit breaker/fallback data")])
+    s = score_run(DISK, make_result(report, calls=[("lookup_runbook", {}, "add caching, circuit breaker or fallback data")]))
+    assert s.grounding is None and not s.ungrounded  # nothing checkable: skipped, not failed
+
+
+def test_absolute_paths_are_still_checked():
+    assert _grounding("full at /var/log/shop", "mount /var/log/shop 99.8") == 1.0
+    assert _grounding("full at /var/log/other", "mount /var/log/shop 99.8") == 0.0
+
+
+def test_facts_filed_under_the_wrong_tool_are_flagged():
+    # real catch: config facts cited to get_recent_deployments
+    finding = "v2.15.0 (2026-11-08): refactor, no config changes. Config shows db_pool_size 10 and timeout 30s"
+    deploys = '[{"time": "2026-11-08T08:34:09Z", "version": "v2.15.0", "config_changes": {}}]'
+    assert _grounding(finding, deploys, tool="get_recent_deployments") == 0.0

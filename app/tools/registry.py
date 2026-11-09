@@ -18,6 +18,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from app.core.redaction import redact
+from app.tools.jsonschema import inline_refs
 
 MAX_OUTPUT_CHARS = 8000
 
@@ -71,7 +72,7 @@ class ToolRegistry:
         """Tool definitions in the shape the Anthropic Messages API expects."""
         defs = []
         for t in self._tools.values():
-            schema = t.input_model.model_json_schema()
+            schema = inline_refs(t.input_model.model_json_schema())
             schema.pop("title", None)
             defs.append({"name": t.name, "description": t.description, "input_schema": schema})
         return defs

@@ -21,6 +21,7 @@ from app.agent.prompts import (
     SYSTEM_PROMPT,
 )
 from app.agent.schemas import AgentResult, FinalReport, Guardrails, Step
+from app.tools.jsonschema import inline_refs
 from app.tools.registry import ToolProvider
 
 
@@ -31,7 +32,7 @@ class MessagesClient(Protocol):
 
 
 def _submit_report_tool() -> dict:
-    schema = FinalReport.model_json_schema()
+    schema = inline_refs(FinalReport.model_json_schema())
     schema.pop("title", None)
     return {"name": SUBMIT_REPORT_TOOL_NAME, "description": SUBMIT_REPORT_DESCRIPTION, "input_schema": schema}
 

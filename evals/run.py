@@ -93,8 +93,8 @@ def summarize(model: str, n: int, records: list[RunRecord]) -> str:
         f"# Eval results: {model}", "",
         f"{datetime.now(timezone.utc):%Y-%m-%d} - {n} runs per scenario, real API, deterministic scoring "
         "(see `evals/scoring.py`).", "",
-        "| Scenario | Pass | Correct category | Grounding | Efficient | Avg tool calls | Avg iters | Avg tokens (in/out) | Avg s |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| Scenario | Pass | Correct category | Grounding | Efficient | Runs with tool errors | Avg tool calls | Avg iters | Avg tokens (in/out) | Avg s |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for name in SCENARIOS:
         rs = [r for r in records if r.scenario == name]
@@ -104,11 +104,12 @@ def summarize(model: str, n: int, records: list[RunRecord]) -> str:
         lines.append(
             f"| `{name}` | {pct([r.score.passed for r in rs])} | {pct([r.score.correct_category for r in rs])} "
             f"| {mean(grounding):.2f} | {pct([r.score.efficient for r in rs])} "
-            f"| {mean(r.score.tool_calls for r in rs):.1f} | {mean(r.iterations for r in rs):.1f} "
+            f"| {pct([r.score.tool_errors > 0 for r in rs])} | {mean(r.score.tool_calls for r in rs):.1f} | {mean(r.iterations for r in rs):.1f} "
             f"| {mean(r.input_tokens for r in rs):.0f}/{mean(r.output_tokens for r in rs):.0f} "
             f"| {mean(r.seconds for r in rs):.0f} |" if grounding else
             f"| `{name}` | {pct([r.score.passed for r in rs])} | {pct([r.score.correct_category for r in rs])} "
-            f"| n/a | {pct([r.score.efficient for r in rs])} | {mean(r.score.tool_calls for r in rs):.1f} "
+            f"| n/a | {pct([r.score.efficient for r in rs])} | {pct([r.score.tool_errors > 0 for r in rs])} "
+            f"| {mean(r.score.tool_calls for r in rs):.1f} "
             f"| {mean(r.iterations for r in rs):.1f} | {mean(r.input_tokens for r in rs):.0f}/"
             f"{mean(r.output_tokens for r in rs):.0f} | {mean(r.seconds for r in rs):.0f} |"
         )
