@@ -103,13 +103,14 @@ Tool descriptions state *when* to use each tool, because that text is what the m
 - [x] **Phase 4 – MCP:** the tool registry is served by an MCP server (stdio); the agent consumes it through an MCP client adapter. 8 MCP tests (44 total), including a real subprocess round trip
 - [x] **Phase 5 – Persistence + API:** SQLAlchemy 2 models + Alembic migration, REST endpoints, background runs (202 + polling), every step persisted as it happens, restart sweep, 13 integration tests against real PostgreSQL (57 tests total)
 - [x] **Phase 6 – Evals:** 6 scenarios x repeated real-API runs, deterministic scoring (root-cause correctness, evidence grounding, efficiency, prompt-injection resistance), free re-scoring of saved traces, model comparison (73 tests + 6 opt-in evals)
-- [ ] **Phase 7 – Hardening:** auth, rate limiting, redaction audit, timeouts, retries
+- [x] **Phase 7 – Hardening:** API-key auth, rate limits and cost caps, redaction at every storage boundary (15-format audit corpus), timeouts/retries, readiness probe, production fail-fast, correlated logging (121 tests + 6 opt-in evals)
 - [ ] **Phase 8 – Polish:** results table, demo transcript
 
 ## API
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /health`, `GET /ready` | Liveness and DB readiness (public). Every other endpoint needs the `X-API-Key` header |
 | `POST /incidents` | Create an incident (`title`, `scenario`, optional `description`). `scenario` picks which demo-world fault to inject. |
 | `GET /incidents/{id}` | Fetch an incident |
 | `POST /incidents/{id}/investigations` | Start an investigation. Returns **202** immediately; **409** if one is already in flight for this incident |
@@ -120,7 +121,7 @@ Interactive docs at `/docs`. Verified end to end in Docker with the real model: 
 
 **Reliability details:** steps are committed one by one, so a crash mid-run still leaves a usable trace; a crashing runner marks the run `failed` with the exception instead of leaving it `running`; on startup, runs left `pending`/`running` by a previous process are marked `failed` ("interrupted by server restart").
 
-**Known limitations (deliberate for now):** background work uses FastAPI `BackgroundTasks` (a worker queue is the scale-out path); the restart sweep assumes a single API instance (several replicas would need a heartbeat/lease column); no authentication until Phase 7.
+**Known limitations (deliberate):** background work uses FastAPI `BackgroundTasks` (a worker queue is the scale-out path); the restart sweep assumes a single API instance (several replicas would need a heartbeat/lease column). See [Security and hardening](#security-and-hardening) for auth and limits.
 
 ## Evaluation results
 
@@ -161,6 +162,24 @@ Haiku is ~5x cheaper overall but reaches the answer less directly: more steps, m
 .venv/bin/pytest -m eval -v                                            # one run per scenario, pass/fail
 ```
 
+## Security and hardening
+
+Threat model: an authenticated-but-curious client, untrusted *content* the agent reads (logs, config, runbooks), pasted secrets, and cost/abuse of an LLM-backed endpoint.
+
+| Risk | Control | Verified by |
+|---|---|---|
+| Unauthenticated access | `X-API-Key` required on every route except `/health` and `/ready`; constant-time comparison (`secrets.compare_digest`) | tests for every route, wrong/odd-length keys |
+| Key brute-forcing | Failed attempts throttled per client IP (429 + `Retry-After`) | integration test |
+| Weak key in production | `APP_ENV=production` refuses to start unless `API_KEY` is 16+ random characters | unit tests + checked in the real container |
+| Runaway cost / abuse | Per-key request limit; a tighter limit on *starting* investigations; cap on concurrent investigations; per-run guardrails (iterations, tokens, wall clock) | integration tests |
+| Secrets in model context or storage | Redaction on tool output, on submitted incident text, on every persisted step and report, and on failure reasons | 15-format corpus (AWS, GitHub, Slack, Stripe, Anthropic, JWT, PEM, URL passwords, `key=value`) plus a check that ordinary diagnostic text is untouched |
+| Prompt injection via logs/config | Read-only, allow-listed tools; no shell or free-form SQL; tools take enums and bounded strings, never paths; tool output treated as data | `log_injection` eval scenario (100% resisted, 30 runs) |
+| Hung dependencies | Explicit timeouts and retries on the Claude client (60 s, 3 retries), MCP calls, and DB statements (15 s) | tests assert the settings are applied |
+| Stuck or lost runs | Crash handling marks runs `failed`; startup sweep fails orphaned runs | integration tests |
+| Debuggability | Every log line of a run carries `inv=<id>`; `/ready` checks the DB without leaking details | caplog test, 503 test |
+
+**Known gaps, stated plainly:** one shared API key, so no per-user authorization or audit identity (all callers see all incidents); rate limits and the restart sweep are in-process, so they assume a single API instance (the scale-out fix is Redis-backed limits plus a heartbeat column); TLS and key rotation are left to the deployment; `/docs` is public and lists the API shape (not data); the demo world is synthetic, so these controls are exercised against it rather than against real infrastructure.
+
 ## Testing strategy
 
 1. **Unit tests** (deterministic): every tool against every fault scenario, argument validation, path/enum rejection, secret redaction, truncation.
@@ -183,11 +202,12 @@ docker compose up --build        # API on :8000 (applies migrations on start), P
 Try the API (needs `ANTHROPIC_API_KEY` in `.env`; a run costs a few cents):
 
 ```bash
-curl -s -X POST localhost:8000/incidents -H 'content-type: application/json' \
-  -d '{"title":"Uploads failing","scenario":"disk_full"}'          # -> {"id": 1, ...}
-curl -s -X POST localhost:8000/incidents/1/investigations          # -> 202, investigation id
-curl -s localhost:8000/investigations/1                            # poll status + report
-curl -s localhost:8000/investigations/1/steps                      # full trace
+export API_KEY=...   # the API_KEY from your .env; sent as the X-API-Key header
+curl -s -X POST localhost:8000/incidents -H "X-API-Key: $API_KEY" -H 'content-type: application/json' \
+  -d '{"title":"Uploads failing","scenario":"disk_full"}'                         # -> {"id": 1, ...}
+curl -s -X POST localhost:8000/incidents/1/investigations -H "X-API-Key: $API_KEY"  # -> 202
+curl -s localhost:8000/investigations/1 -H "X-API-Key: $API_KEY"                  # poll status + report
+curl -s localhost:8000/investigations/1/steps -H "X-API-Key: $API_KEY"            # full trace
 ```
 
 ## Repository layout

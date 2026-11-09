@@ -10,7 +10,8 @@ from sqlalchemy.orm import sessionmaker
 from app.agent.orchestrator import run_investigation
 from app.agent.schemas import Guardrails
 from app.api.deps import get_agent_runner, get_session_factory
-from app.core.config import get_settings
+from app.api.security import Limiters, get_limiters
+from app.core.config import Settings, get_settings
 from app.db import models  # noqa: F401
 from app.db.base import Base
 from app.main import app
@@ -74,13 +75,31 @@ def scripted_runner(tmp_path):
     return _make
 
 
+TEST_API_KEY = "test-key-0123456789abcdef"
+
+
 @pytest.fixture
-def api(session_factory):
-    """Returns (client, use_runner). Background tasks complete before TestClient returns."""
+def test_settings():
+    """Mutable per-test settings (tests may tweak limits before making requests)."""
+    return Settings(api_key=TEST_API_KEY)
+
+
+@pytest.fixture
+def limiters(test_settings):
+    """Fresh rate-limiter state per test (production uses a process-wide cached instance)."""
+    return Limiters(test_settings)
+
+
+@pytest.fixture
+def api(session_factory, test_settings, limiters):
+    """Returns (authenticated client, use_runner). Background tasks complete before TestClient returns."""
     holder = {"runner": None}
     app.dependency_overrides[get_session_factory] = lambda: session_factory
     app.dependency_overrides[get_agent_runner] = lambda: holder["runner"]
-    client = TestClient(app)  # no `with`: lifespan (startup sweep) is tested separately
+    app.dependency_overrides[get_settings] = lambda: test_settings
+    app.dependency_overrides[get_limiters] = lambda: limiters
+    # no `with`: lifespan (startup sweep) is tested separately
+    client = TestClient(app, headers={"X-API-Key": TEST_API_KEY})
 
     def use_runner(runner):
         holder["runner"] = runner

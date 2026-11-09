@@ -33,6 +33,8 @@ def default_agent_runner(incident_text: str, scenario: str, on_step: Callable[[S
         )
         with McpToolProvider(params) as tools:
             return run_investigation(
-                incident_text, tools, anthropic.Anthropic(api_key=settings.anthropic_api_key),
+                incident_text, tools, anthropic.Anthropic(
+                    api_key=settings.anthropic_api_key,
+                    timeout=settings.anthropic_timeout_s, max_retries=settings.anthropic_max_retries),
                 settings.anthropic_model, guardrails=Guardrails(), on_step=on_step,
             )

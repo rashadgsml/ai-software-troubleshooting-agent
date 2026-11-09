@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
@@ -11,6 +12,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.agent.runner import AgentRunner
 from app.agent.schemas import Step
+from app.core.logging import investigation_id_var
+from app.core.redaction import redact, redact_json
 from app.db.models import IN_FLIGHT, Incident, Investigation, InvestigationStep
 
 log = logging.getLogger(__name__)
@@ -40,7 +43,8 @@ def create_investigation(session: Session, incident: Incident, model: str) -> In
 
 
 def _json_safe(value: object) -> object:
-    return json.loads(json.dumps(value, default=str))
+    """JSON-serialisable AND redacted: the model may echo a secret into its own text/report."""
+    return redact_json(json.loads(json.dumps(value, default=str)))
 
 
 def run_investigation_job(
@@ -48,6 +52,8 @@ def run_investigation_job(
 ) -> None:
     """Background task body. Opens its own sessions (the request's session is long closed)
     and commits each step immediately, so a crash still leaves a usable trace."""
+    investigation_id_var.set(str(investigation_id))
+    began = time.monotonic()
     with session_factory() as session:
         investigation = session.get(Investigation, investigation_id)
         if investigation is None:
@@ -56,6 +62,7 @@ def run_investigation_job(
         incident_text, scenario = f"{incident.title}\n\n{incident.description}", incident.scenario
         investigation.status, investigation.started_at = "running", _now()
         session.commit()
+    log.info("investigation started (scenario=%s)", scenario)
 
     def on_step(step: Step) -> None:
         with session_factory() as s:
@@ -72,15 +79,17 @@ def run_investigation_job(
         usage = (result.iterations, result.input_tokens, result.output_tokens)
     except Exception as exc:  # never leave a run stuck in "running"
         log.exception("investigation %s crashed", investigation_id)
-        status, reason, report, usage = "failed", f"{type(exc).__name__}: {exc}", None, (0, 0, 0)
+        status, reason, report, usage = "failed", redact(f"{type(exc).__name__}: {exc}"), None, (0, 0, 0)
 
     with session_factory() as session:
         investigation = session.get(Investigation, investigation_id)
-        investigation.status, investigation.reason = status, reason
-        investigation.final_report = report.model_dump() if report else None
+        investigation.status, investigation.reason = status, redact(reason) if reason else None
+        investigation.final_report = _json_safe(report.model_dump()) if report else None
         investigation.iterations, investigation.input_tokens, investigation.output_tokens = usage
         investigation.finished_at = _now()
         session.commit()
+    log.info("investigation finished status=%s iterations=%s tokens_in=%s tokens_out=%s seconds=%.1f",
+             status, usage[0], usage[1], usage[2], time.monotonic() - began)
 
 
 def mark_interrupted(session_factory: sessionmaker[Session]) -> int:
