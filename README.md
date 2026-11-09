@@ -55,6 +55,8 @@ Client ──GET /investigations/{id}──▶ status, trace, final report
 | Target system | Sandboxed fault-injection "world" | Reproducible incidents with known answers, which is what makes evaluation possible. |
 | Tool boundary | A registry (name, description, Pydantic model, handler) | One place for validation, redaction, truncation and error handling. MCP will wrap this same registry. |
 | Tool arguments | Enums and bounded strings only | The model cannot request arbitrary paths or queries. |
+| MCP server | Serves the *existing* registry through the low-level `Server` (MCP SDK v2) | Tools are declared once; validation, redaction and truncation behave identically over MCP and in-process. Any MCP client (Claude Desktop, an IDE) can use the same tools. |
+| MCP client | Sync adapter running the async client in one long-lived task on its own thread | Keeps the orchestrator simple and testable. anyio transports must be entered and exited from the same task, hence one task for the whole session. Phase 5 will revisit this if the API goes fully async. |
 | Persistence | PostgreSQL, step-level trace | Audit log of everything the agent did and saw. |
 
 ## Example run (spot check, not an eval)
@@ -97,7 +99,7 @@ Tool descriptions state *when* to use each tool, because that text is what the m
 - [x] **Phase 1 – Tool-calling basics:** hand-driven `tool_use` / `tool_result` round trip against the real API
 - [x] **Phase 2 – Tools & demo target:** fault injection (5 scenarios), 7 read-only tools, registry with validation / redaction / truncation, 23 unit tests
 - [x] **Phase 3 – Agent orchestrator:** the loop, system prompt, guardrails (iterations / tokens / wall-clock), validated structured report via a `submit_report` tool, 13 fake-client tests (36 total)
-- [ ] **Phase 4 – MCP:** tools served over MCP, agent consumes them via an MCP client
+- [x] **Phase 4 – MCP:** the tool registry is served by an MCP server (stdio); the agent consumes it through an MCP client adapter. 8 MCP tests (44 total), including a real subprocess round trip
 - [ ] **Phase 5 – Persistence + API:** SQLAlchemy/Alembic models, endpoints, background runs, stored trace
 - [ ] **Phase 6 – Evals:** scenario scoring (root-cause correctness, evidence grounding, tool efficiency, injection resistance)
 - [ ] **Phase 7 – Hardening:** auth, rate limiting, redaction audit, timeouts, retries
@@ -116,7 +118,8 @@ cp .env.example .env            # add your ANTHROPIC_API_KEY
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest                 # unit tests (no API calls)
 docker compose up --build        # API on :8000, Postgres on :5432
-.venv/bin/python -m app.agent.cli disk_full       # run the agent on a scenario (a few cents of API cost)
+.venv/bin/python -m app.agent.cli disk_full       # run the agent on a scenario via MCP (a few cents of API cost)
+.venv/bin/python -m app.agent.cli disk_full --direct   # same, but tools called in-process (no MCP)
 .venv/bin/python scripts/phase1_tool_calling.py   # the raw tool-calling protocol, step by step
 ```
 
@@ -125,7 +128,8 @@ docker compose up --build        # API on :8000, Postgres on :5432
 ```
 app/
   agent/                             # orchestrator loop, prompts, report schema, CLI
-  api/  mcp_server/  db/             # FastAPI layer, MCP, persistence (upcoming phases)
+  mcp_server/                        # MCP server over the tool registry (python -m app.mcp_server)
+  api/  db/                          # FastAPI layer, persistence (upcoming phases)
   core/                              # settings, secret redaction
   tools/                             # tool registry + read-only diagnostic tools
 demo_app/                            # fault-injectable target system + runbooks

@@ -21,7 +21,7 @@ from app.agent.prompts import (
     SYSTEM_PROMPT,
 )
 from app.agent.schemas import AgentResult, FinalReport, Guardrails, Step
-from app.tools.registry import ToolRegistry
+from app.tools.registry import ToolProvider
 
 
 class MessagesClient(Protocol):
@@ -38,7 +38,7 @@ def _submit_report_tool() -> dict:
 
 def run_investigation(
     incident_text: str,
-    registry: ToolRegistry,
+    registry: ToolProvider,
     client: MessagesClient,
     model: str,
     guardrails: Guardrails | None = None,

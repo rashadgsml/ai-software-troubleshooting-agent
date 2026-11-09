@@ -1,26 +1,28 @@
 """Run the agent on a fault scenario from the terminal.
 
-    .venv/bin/python -m app.agent.cli pool_exhausted
-    .venv/bin/python -m app.agent.cli bad_config --incident "Payments are failing"
+    .venv/bin/python -m app.agent.cli pool_exhausted            # tools via MCP (stdio subprocess)
+    .venv/bin/python -m app.agent.cli bad_config --direct       # tools called in-process, no MCP
 """
 
 import argparse
+import contextlib
 import json
+import sys
 import tempfile
 from pathlib import Path
 
 import anthropic
-from fastapi.testclient import TestClient
+from mcp import StdioServerParameters
 
+from app.agent.mcp_client import McpToolProvider
 from app.agent.orchestrator import run_investigation
 from app.agent.schemas import Step
 from app.core.config import get_settings
 from app.tools.diagnostics import build_registry
-from app.tools.registry import ToolContext
+from app.tools.factory import make_context
 from demo_app.faults import SCENARIOS, build_world
-from demo_app.main import create_app
 
-RUNBOOKS = Path(__file__).resolve().parents[2] / "demo_app" / "runbooks"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _print_step(step: Step) -> None:
@@ -39,23 +41,30 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", choices=sorted(SCENARIOS))
     parser.add_argument("--incident", help="Override the incident text.")
+    parser.add_argument("--direct", action="store_true", help="Skip MCP; call tools in-process.")
     args = parser.parse_args()
 
     settings = get_settings()
     scenario = SCENARIOS[args.scenario]
     incident = args.incident or scenario.incident
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
         data_dir = Path(tmp)
         build_world(data_dir, args.scenario)
-        # In-process HTTP client talking to the demo app (no server needed).
-        ctx = ToolContext(data_dir=data_dir, http=TestClient(create_app(data_dir)), runbooks_dir=RUNBOOKS)
-        registry = build_registry(ctx)
+        if args.direct:
+            tools = build_registry(make_context(data_dir))
+            transport = "direct"
+        else:
+            tools = stack.enter_context(McpToolProvider(StdioServerParameters(
+                command=sys.executable, args=["-m", "app.mcp_server"],
+                env={"DEMO_DATA_DIR": str(data_dir)}, cwd=PROJECT_ROOT,
+            )))
+            transport = "MCP/stdio"
 
-        print(f"Scenario: {args.scenario}   (hidden truth: {scenario.root_cause})")
+        print(f"Scenario: {args.scenario}   (hidden truth: {scenario.root_cause})   tools: {transport}")
         print(f"Incident: {incident}\n")
         result = run_investigation(
-            incident, registry, anthropic.Anthropic(api_key=settings.anthropic_api_key),
+            incident, tools, anthropic.Anthropic(api_key=settings.anthropic_api_key),
             settings.anthropic_model, on_step=_print_step,
         )
 

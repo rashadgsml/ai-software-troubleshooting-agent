@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -43,6 +43,14 @@ class Tool:
     description: str
     input_model: type[BaseModel]
     handler: Callable[[BaseModel, ToolContext], Any]
+
+
+class ToolProvider(Protocol):
+    """What the agent needs from a tool source: a local ToolRegistry or an MCP client."""
+
+    def to_anthropic_tools(self) -> list[dict]: ...
+
+    def call(self, name: str, arguments: dict) -> ToolResult: ...
 
 
 class ToolRegistry:
