@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "postgresql+psycopg://troubleshooter:troubleshooter@localhost:5432/troubleshooter"
+    database_url: str = "postgresql+psycopg://troubleshooter:troubleshooter@localhost:5433/troubleshooter"
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5-5"
     api_key: str = "change-me"  # used for API auth in the hardening phase
