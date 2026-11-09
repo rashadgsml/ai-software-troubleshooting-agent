@@ -57,6 +57,24 @@ Client ──GET /investigations/{id}──▶ status, trace, final report
 | Tool arguments | Enums and bounded strings only | The model cannot request arbitrary paths or queries. |
 | Persistence | PostgreSQL, step-level trace | Audit log of everything the agent did and saw. |
 
+## Example run (spot check, not an eval)
+
+`python -m app.agent.cli pool_exhausted` against the real API. The agent checked health, error logs, deploys and DB stats, probed a dependency to rule it out, looked up the runbook, then reported:
+
+```
+-> check_http_health(demo-app)          503 degraded
+-> search_logs(level=ERROR)             QueuePool limit of size 10 reached ...
+-> get_recent_deployments()             v2.15.0 "single transaction" refactor
+-> query_db_stats()                     10/10 active, 8 idle in transaction, 37 waiting
+-> check_http_health(payment-service)   healthy  (rules out upstream)
+-> lookup_runbook("connection pool exhausted")
+-> submit_report(...)                   ERROR: invalid report, fix and resubmit
+-> submit_report(...)                   Report accepted.
+status=completed  iterations=4  category=db_connection_pool_exhausted  confidence=medium
+```
+
+Two things worth noting. The model's first `submit_report` was malformed; schema validation rejected it, the error went back as a tool result, and the model corrected itself on the next try. And on the `healthy` scenario it reported `category: none` rather than inventing a problem. Two runs prove the loop works; measuring *how often* it is right is the job of the Phase 6 evals.
+
 ## Fault scenarios (ground truth for evals)
 
 | Scenario | Planted root cause | Key evidence the agent must find |
@@ -78,7 +96,7 @@ Tool descriptions state *when* to use each tool, because that text is what the m
 - [x] **Phase 0 – Foundations:** FastAPI skeleton, env-based settings, Dockerfile, docker-compose (API + Postgres 16), pytest
 - [x] **Phase 1 – Tool-calling basics:** hand-driven `tool_use` / `tool_result` round trip against the real API
 - [x] **Phase 2 – Tools & demo target:** fault injection (5 scenarios), 7 read-only tools, registry with validation / redaction / truncation, 23 unit tests
-- [ ] **Phase 3 – Agent orchestrator:** the loop, system prompt, guardrails, structured report, fake-client tests
+- [x] **Phase 3 – Agent orchestrator:** the loop, system prompt, guardrails (iterations / tokens / wall-clock), validated structured report via a `submit_report` tool, 13 fake-client tests (36 total)
 - [ ] **Phase 4 – MCP:** tools served over MCP, agent consumes them via an MCP client
 - [ ] **Phase 5 – Persistence + API:** SQLAlchemy/Alembic models, endpoints, background runs, stored trace
 - [ ] **Phase 6 – Evals:** scenario scoring (root-cause correctness, evidence grounding, tool efficiency, injection resistance)
@@ -98,14 +116,16 @@ cp .env.example .env            # add your ANTHROPIC_API_KEY
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest                 # unit tests (no API calls)
 docker compose up --build        # API on :8000, Postgres on :5432
-.venv/bin/python scripts/phase1_tool_calling.py   # live tool-calling demo (small API cost)
+.venv/bin/python -m app.agent.cli disk_full       # run the agent on a scenario (a few cents of API cost)
+.venv/bin/python scripts/phase1_tool_calling.py   # the raw tool-calling protocol, step by step
 ```
 
 ## Repository layout
 
 ```
 app/
-  api/  agent/  mcp_server/  db/    # FastAPI layer, orchestrator, MCP, persistence
+  agent/                             # orchestrator loop, prompts, report schema, CLI
+  api/  mcp_server/  db/             # FastAPI layer, MCP, persistence (upcoming phases)
   core/                              # settings, secret redaction
   tools/                             # tool registry + read-only diagnostic tools
 demo_app/                            # fault-injectable target system + runbooks
